@@ -57,10 +57,6 @@ RUN npx prisma generate
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/tsconfig.paths.json ./tsconfig.paths.json
 
-# Copy firebase credentials
-RUN mkdir -p ./src
-COPY --from=builder /app/src/firebase.json ./src/firebase.json
-
 # Expose port
 EXPOSE 8080
 
