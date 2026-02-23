@@ -70,7 +70,7 @@ export class AuthService {
   }
 
   async login(body: LoginDto) {
-    this.logger.log(`Login attempt for ${body.email}`);
+    this.logger.log(`Login attempt for ${body.email}`, body);
     return true;
   }
 
