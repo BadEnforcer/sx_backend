@@ -142,27 +142,47 @@ export class LogoutResponseDto {
 
 /** Single key in JWKS (RSA public key for JWT verification). */
 export class JwksKeyDto {
-  @ApiProperty({ description: 'Key ID (use with JWT header kid)' })
+  @ApiProperty({
+    description: 'Key ID, used to match the JWT header kid',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
   kid!: string;
 
-  @ApiProperty({ example: 'RSA' })
+  @ApiProperty({
+    description:
+      'Key Type, identifies the cryptographic algorithm family used with the key',
+    example: 'RSA',
+  })
   kty!: string;
 
-  @ApiProperty({ example: 'RS256' })
+  @ApiProperty({
+    description: 'Algorithm intended for use with the key',
+    example: 'RS256',
+  })
   alg!: string;
 
-  @ApiProperty({ example: 'sig' })
+  @ApiProperty({
+    description:
+      'Public Key Use, identifies the intended use of the public key',
+    example: 'sig',
+  })
   use!: string;
 
-  @ApiProperty({ description: 'RSA modulus (base64url)' })
+  @ApiProperty({ description: 'RSA public modulus in Base64url encoding' })
   n!: string;
 
-  @ApiProperty({ description: 'RSA exponent (base64url)' })
+  @ApiProperty({
+    description: 'RSA public exponent in Base64url encoding',
+    example: 'AQAB',
+  })
   e!: string;
 }
 
 /** Response for GET /auth/jwks. */
 export class JwksResponseDto {
-  @ApiProperty({ type: [JwksKeyDto], description: 'Public keys for verifying access tokens' })
+  @ApiProperty({
+    type: [JwksKeyDto],
+    description: 'Array of public keys for verifying access tokens',
+  })
   keys!: JwksKeyDto[];
 }

@@ -7,17 +7,21 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from 'src/prisma/prisma.service';
-import { REDIS_CLIENT } from 'src/redis/redis.constants';
+import { PrismaService } from '../prisma/prisma.service';
+import { REDIS_CLIENT } from '../redis/redis.constants';
 import type { RegisterDto, LoginDto } from './auth.dto';
 import * as bcrypt from 'bcrypt';
-import { v4 as uuidv4 } from 'uuid';
 import * as jose from 'jose';
 import * as crypto from 'node:crypto';
 import type { Redis } from 'ioredis';
 
 const JWKS_PUBLIC_KEY_CACHE_KEY = 'jwks:publicKey';
 const JWKS_PUBLIC_KEY_TTL_SEC = 30;
+
+const JWKS_RESPONSE_CACHE_KEY = 'jwks:response';
+const JWKS_RESPONSE_TTL_SEC = 300; // 5 minutes
+const JWKS_PRIVATE_KEY_CACHE_KEY = 'jwks:privateKey';
+const JWKS_PRIVATE_KEY_TTL_SEC = 300; // 5 minutes
 
 const ACCESS_TOKEN_TTL_MIN_DEFAULT = 15;
 const ACCESS_TOKEN_TTL_MAX = 30;
@@ -58,7 +62,7 @@ export class AuthService {
       }
 
       const hashedPassword = await bcrypt.hash(body.password, 10);
-      const userId = uuidv4();
+      const userId = crypto.randomUUID();
       const name = body.name;
 
       const user = await tx.user.create({
@@ -72,7 +76,7 @@ export class AuthService {
 
       await tx.account.create({
         data: {
-          id: uuidv4(),
+          id: crypto.randomUUID(),
           accountId: userId,
           providerId: 'credential',
           userId,
@@ -260,8 +264,14 @@ export class AuthService {
   /**
    * Return the public keys as a JSON Web Key Set for frontend JWT verification.
    * Includes all currently valid JWKS keys (not expired). Each key has kid, alg, use.
+   * Note: The response is cached in Redis for 5 minutes to prevent DoS via expensive crypto operations.
    */
   async getJwks(): Promise<{ keys: jose.JWK[] }> {
+    const cached = await this.redis.get(JWKS_RESPONSE_CACHE_KEY);
+    if (cached) {
+      return JSON.parse(cached) as { keys: jose.JWK[] };
+    }
+
     const now = new Date();
     const rows = await this.prisma.jwks.findMany({
       where: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
@@ -277,7 +287,15 @@ export class AuthService {
         use: 'sig',
       } as jose.JWK);
     }
-    return { keys };
+
+    const response = { keys };
+    await this.redis.set(
+      JWKS_RESPONSE_CACHE_KEY,
+      JSON.stringify(response),
+      'EX',
+      JWKS_RESPONSE_TTL_SEC,
+    );
+    return response;
   }
 
   /** Get JWKS public key PEM: from Redis cache if present, else from DB and then cached (30s TTL). */
@@ -305,13 +323,26 @@ export class AuthService {
     privateKeyPem: string;
     kid: string;
   }> {
+    const cached = await this.redis.get(JWKS_PRIVATE_KEY_CACHE_KEY);
+    if (cached) {
+      this.logger.debug(`Reusing cached JWKS private key`);
+      return JSON.parse(cached) as { privateKeyPem: string; kid: string };
+    }
+
     const now = new Date();
     const existing = await this.prisma.jwks.findFirst({
       where: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
     });
     if (existing) {
       this.logger.debug(`Reusing existing JWKS key id=${existing.id}`);
-      return { privateKeyPem: existing.privateKey, kid: existing.id };
+      const result = { privateKeyPem: existing.privateKey, kid: existing.id };
+      await this.redis.set(
+        JWKS_PRIVATE_KEY_CACHE_KEY,
+        JSON.stringify(result),
+        'EX',
+        JWKS_PRIVATE_KEY_TTL_SEC,
+      );
+      return result;
     }
 
     this.logger.log('Creating new JWKS key pair');
@@ -320,7 +351,7 @@ export class AuthService {
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       publicKeyEncoding: { type: 'spki', format: 'pem' },
     });
-    const jwksId = uuidv4();
+    const jwksId = crypto.randomUUID();
     await this.prisma.jwks.create({
       data: {
         id: jwksId,
@@ -331,7 +362,19 @@ export class AuthService {
       },
     });
     this.logger.log(`JWKS key created id=${jwksId}`);
-    return { privateKeyPem: privateKey, kid: jwksId };
+
+    // Break caches when a new key is added
+    await this.redis.del(JWKS_RESPONSE_CACHE_KEY);
+    await this.redis.del(JWKS_PUBLIC_KEY_CACHE_KEY);
+
+    const result = { privateKeyPem: privateKey, kid: jwksId };
+    await this.redis.set(
+      JWKS_PRIVATE_KEY_CACHE_KEY,
+      JSON.stringify(result),
+      'EX',
+      JWKS_PRIVATE_KEY_TTL_SEC,
+    );
+    return result;
   }
 
   /** Access token TTL in minutes from config, clamped to 15–30. Returns string like "15m" for jose. */
@@ -389,7 +432,7 @@ export class AuthService {
     const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
     await this.prisma.session.create({
       data: {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         token: refreshToken,
         userId,
         expiresAt,

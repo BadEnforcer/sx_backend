@@ -30,12 +30,14 @@ export class AuthController {
   /**
    * Return the JSON Web Key Set (JWKS) of public keys used to sign access tokens.
    * Public endpoint; no auth. Frontend can use this with jose.createRemoteJWKSet(new URL(...)) or similar to verify JWTs.
+   *
+   * Caveat: This endpoint's response is cached for 5 minutes to prevent expensive crypto operations on every request.
    */
   @Get('jwks')
   @ApiOperation({
     summary: 'JWKS',
     description:
-      'JSON Web Key Set of public keys for verifying access tokens. Use with jose or similar on the frontend.',
+      'JSON Web Key Set of public keys for verifying access tokens. Use with jose or similar on the frontend.\n\n**Note:** The response is cached for 5 minutes to prevent DoS from expensive cryptographic operations.',
   })
   @ApiResponse({
     status: 200,
