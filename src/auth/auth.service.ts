@@ -1,11 +1,22 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { REDIS_CLIENT } from 'src/redis/redis.constants';
 import type { RegisterDto, LoginDto } from './auth.dto';
 import * as bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
 import * as jose from 'jose';
 import * as crypto from 'node:crypto';
+import type { Redis } from 'ioredis';
+
+const JWKS_PUBLIC_KEY_CACHE_KEY = 'jwks:publicKey';
+const JWKS_PUBLIC_KEY_TTL_SEC = 30;
 
 const ACCESS_TOKEN_TTL_MIN_DEFAULT = 15;
 const ACCESS_TOKEN_TTL_MAX = 30;
@@ -19,6 +30,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
 
   async register(body: RegisterDto) {
@@ -70,8 +82,59 @@ export class AuthService {
   }
 
   async login(body: LoginDto) {
-    this.logger.log(`Login attempt for ${body.email}`, body);
-    return true;
+    this.logger.log(`Login attempt for ${body.email}`);
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      const existingUser = await tx.user.findUnique({
+        where: { email: body.email },
+        include: {
+          accounts: {
+            where: { providerId: 'credential' },
+            take: 1,
+          },
+        },
+      });
+
+      if (!existingUser) {
+        this.logger.error(`Login failed: user not found ${body.email}`);
+        throw new UnauthorizedException('Invalid email or password');
+      }
+
+      const credentialAccount = existingUser.accounts[0];
+      if (!credentialAccount?.password) {
+        this.logger.error(
+          `Login failed: no credential account for ${body.email}`,
+        );
+        throw new UnauthorizedException('Invalid email or password');
+      }
+
+      const passwordValid = await bcrypt.compare(
+        body.password,
+        credentialAccount.password,
+      );
+      if (!passwordValid) {
+        this.logger.error(`Login failed: invalid password for ${body.email}`);
+        throw new UnauthorizedException('Invalid email or password');
+      }
+
+      return {
+        id: existingUser.id,
+        name: existingUser.name,
+        email: existingUser.email,
+        emailVerified: existingUser.emailVerified,
+        image: existingUser.image,
+        createdAt: existingUser.createdAt,
+        updatedAt: existingUser.updatedAt,
+      };
+    });
+
+    this.logger.log(`User logged in successfully: ${user.email}`);
+    this.logger.log('Generating access token');
+    const accessToken = await this.signAccessToken(user.id);
+    this.logger.log('Generating refresh token');
+    const refreshToken = await this.generateRefreshToken(user.id);
+    this.logger.log('Returning user');
+    return { user, accessToken, refreshToken };
   }
 
   async me(userId: string) {
@@ -82,6 +145,35 @@ export class AuthService {
   async logout(userId: string) {
     this.logger.log(`Logout for userId=${userId}`);
     return true;
+  }
+
+  /** Verifies the access token (signature + expiry) and returns the payload. Throws if invalid. */
+  async verifyAccessToken(token: string): Promise<{ sub: string }> {
+    const publicKeyPem = await this.getPublicKey();
+    const publicKey = await jose.importSPKI(publicKeyPem, 'RS256');
+    const { payload } = await jose.jwtVerify(token, publicKey);
+    const sub = payload.sub;
+    if (typeof sub !== 'string') throw new Error('Invalid token: missing sub');
+    return { sub };
+  }
+
+  private async getPublicKey(): Promise<string> {
+    const cached = await this.redis.get(JWKS_PUBLIC_KEY_CACHE_KEY);
+    if (cached) return cached;
+
+    const now = new Date();
+    const existing = await this.prisma.jwks.findFirst({
+      where: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    });
+    if (!existing) throw new Error('No JWKS key available for verification');
+
+    await this.redis.set(
+      JWKS_PUBLIC_KEY_CACHE_KEY,
+      existing.publicKey,
+      'EX',
+      JWKS_PUBLIC_KEY_TTL_SEC,
+    );
+    return existing.publicKey;
   }
 
   private async getOrCreateJwksKey(): Promise<{ privateKeyPem: string }> {
