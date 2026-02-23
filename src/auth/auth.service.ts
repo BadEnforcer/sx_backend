@@ -25,6 +25,10 @@ const REFRESH_TOKEN_DAYS_MIN = 7;
 const REFRESH_TOKEN_DAYS_MAX = 30;
 const REFRESH_TOKEN_DAYS_DEFAULT = 7;
 
+/**
+ * Auth service. Handles registration, login, logout, token issuance/verification, and JWKS.
+ * Uses Prisma for user/session/account/JWKS storage and Redis for public-key cache and access-token blacklist.
+ */
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -34,6 +38,12 @@ export class AuthService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
 
+  /**
+   * Register a new user. Creates user and credential account in a transaction, then issues access and refresh tokens.
+   * @param body - Validated register payload (email, name, password).
+   * @returns `{ user, accessToken, refreshToken }` (refreshToken includes expiresAt).
+   * @throws ConflictException if email already exists.
+   */
   async register(body: RegisterDto) {
     this.logger.log(`Registering user ${body.email}`);
 
@@ -82,6 +92,12 @@ export class AuthService {
     return { user: newUser, accessToken, refreshToken };
   }
 
+  /**
+   * Log in with email and password. Looks up user and credential account in a transaction, verifies password, then issues new tokens.
+   * @param body - Validated login payload (email, password).
+   * @returns `{ user, accessToken, refreshToken }`.
+   * @throws UnauthorizedException if user not found, no credential account, or password invalid.
+   */
   async login(body: LoginDto) {
     this.logger.log(`Login attempt for ${body.email}`);
 
@@ -138,6 +154,12 @@ export class AuthService {
     return { user, accessToken, refreshToken };
   }
 
+  /**
+   * Fetch the current user by id with sessions and accounts (for debug). Does not validate tokens.
+   * @param userId - User id (e.g. from JWT sub).
+   * @returns User with sessions and accounts.
+   * @throws NotFoundException if user not found.
+   */
   async me(userId: string) {
     this.logger.log(`Me requested for userId=${userId}`);
 
@@ -158,6 +180,12 @@ export class AuthService {
     return user;
   }
 
+  /**
+   * Log out: delete all sessions for the user (revoke refresh tokens) and optionally blacklist the current access token in Redis.
+   * @param userId - User id to revoke sessions for.
+   * @param accessToken - Optional current access token to blacklist (prevents further API use until it expires).
+   * @returns `{ success: true }`.
+   */
   async logout(userId: string, accessToken?: string) {
     this.logger.log(`Logout for userId=${userId}`);
 
@@ -176,7 +204,12 @@ export class AuthService {
     return { success: true };
   }
 
-  /** Verifies the access token (signature + expiry) and returns the payload. Throws if invalid. */
+  /**
+   * Verifies the access token: loads public key (cached in Redis), checks signature and expiry, returns subject.
+   * @param token - JWT access token string.
+   * @returns `{ sub: string }` (userId).
+   * @throws If token invalid, expired, or missing sub.
+   */
   async verifyAccessToken(token: string): Promise<{ sub: string }> {
     const publicKeyPem = await this.getPublicKey();
     const publicKey = await jose.importSPKI(publicKeyPem, 'RS256');
@@ -186,17 +219,27 @@ export class AuthService {
     return { sub };
   }
 
+  /** Redis key for access-token blacklist: `jwt:blacklist:<sha256(token)>`. */
   private getAccessTokenBlacklistKey(token: string): string {
     const hash = crypto.createHash('sha256').update(token).digest('hex');
     return `jwt:blacklist:${hash}`;
   }
 
+  /**
+   * Check whether the access token has been blacklisted (e.g. after logout).
+   * @param token - JWT access token string.
+   * @returns true if the token is blacklisted.
+   */
   async isAccessTokenBlacklisted(token: string): Promise<boolean> {
     const key = this.getAccessTokenBlacklistKey(token);
     const exists = await this.redis.exists(key);
     return exists === 1;
   }
 
+  /**
+   * Blacklist an access token in Redis so it can no longer be used. TTL is until token exp, or default access TTL if exp missing.
+   * @param token - JWT access token string to blacklist.
+   */
   async blacklistAccessToken(token: string): Promise<void> {
     const payload = jose.decodeJwt(token);
     const exp = payload.exp;
@@ -214,6 +257,7 @@ export class AuthService {
     await this.redis.set(key, '1', 'EX', ttlSeconds);
   }
 
+  /** Get JWKS public key PEM: from Redis cache if present, else from DB and then cached (30s TTL). */
   private async getPublicKey(): Promise<string> {
     const cached = await this.redis.get(JWKS_PUBLIC_KEY_CACHE_KEY);
     if (cached) return cached;
@@ -233,6 +277,7 @@ export class AuthService {
     return existing.publicKey;
   }
 
+  /** Get current JWKS private key: reuse from DB if a valid key exists, otherwise generate and store a new RSA key pair. */
   private async getOrCreateJwksKey(): Promise<{ privateKeyPem: string }> {
     const now = new Date();
     const existing = await this.prisma.jwks.findFirst({
@@ -263,6 +308,7 @@ export class AuthService {
     return { privateKeyPem: privateKey };
   }
 
+  /** Access token TTL in minutes from config, clamped to 15–30. Returns string like "15m" for jose. */
   private getAccessTokenTtl(): string {
     const minutes = this.config.get<number>(
       'ACCESS_TOKEN_TTL_MINUTES',
@@ -275,6 +321,7 @@ export class AuthService {
     return `${clamped}m`;
   }
 
+  /** Refresh token lifetime in days from config, clamped to 7–30. */
   private getRefreshTokenDays(): number {
     const days = this.config.get<number>(
       'REFRESH_TOKEN_TTL_DAYS',
@@ -286,6 +333,7 @@ export class AuthService {
     );
   }
 
+  /** Issue a new RS256 access token for the given user id with configured TTL. */
   private async signAccessToken(userId: string): Promise<string> {
     this.logger.debug(`Signing access token for userId=${userId}`);
     const { privateKeyPem } = await this.getOrCreateJwksKey();
@@ -299,6 +347,12 @@ export class AuthService {
       .sign(privateKey);
   }
 
+  /**
+   * Create a new refresh token: random value, stored as a Session row with configured expiry. Optional ipAddress/userAgent.
+   * @param userId - User id to attach the session to.
+   * @param opts - Optional ipAddress and userAgent for the session.
+   * @returns `{ refreshToken, expiresAt }`.
+   */
   private async generateRefreshToken(
     userId: string,
     opts?: { ipAddress?: string; userAgent?: string },
