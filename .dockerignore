@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+.git
+npm-debug.log
+pnpm-debug.log
+coverage
+README.md
