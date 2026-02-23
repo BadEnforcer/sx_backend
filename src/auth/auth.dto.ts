@@ -139,3 +139,30 @@ export class LogoutResponseDto {
   @ApiProperty({ example: true, description: 'Logout completed' })
   success!: boolean;
 }
+
+/** Single key in JWKS (RSA public key for JWT verification). */
+export class JwksKeyDto {
+  @ApiProperty({ description: 'Key ID (use with JWT header kid)' })
+  kid!: string;
+
+  @ApiProperty({ example: 'RSA' })
+  kty!: string;
+
+  @ApiProperty({ example: 'RS256' })
+  alg!: string;
+
+  @ApiProperty({ example: 'sig' })
+  use!: string;
+
+  @ApiProperty({ description: 'RSA modulus (base64url)' })
+  n!: string;
+
+  @ApiProperty({ description: 'RSA exponent (base64url)' })
+  e!: string;
+}
+
+/** Response for GET /auth/jwks. */
+export class JwksResponseDto {
+  @ApiProperty({ type: [JwksKeyDto], description: 'Public keys for verifying access tokens' })
+  keys!: JwksKeyDto[];
+}

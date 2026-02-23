@@ -257,6 +257,29 @@ export class AuthService {
     await this.redis.set(key, '1', 'EX', ttlSeconds);
   }
 
+  /**
+   * Return the public keys as a JSON Web Key Set for frontend JWT verification.
+   * Includes all currently valid JWKS keys (not expired). Each key has kid, alg, use.
+   */
+  async getJwks(): Promise<{ keys: jose.JWK[] }> {
+    const now = new Date();
+    const rows = await this.prisma.jwks.findMany({
+      where: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    });
+    const keys: jose.JWK[] = [];
+    for (const row of rows) {
+      const publicKey = await jose.importSPKI(row.publicKey, 'RS256');
+      const jwk = await jose.exportJWK(publicKey);
+      keys.push({
+        ...jwk,
+        kid: row.id,
+        alg: 'RS256',
+        use: 'sig',
+      } as jose.JWK);
+    }
+    return { keys };
+  }
+
   /** Get JWKS public key PEM: from Redis cache if present, else from DB and then cached (30s TTL). */
   private async getPublicKey(): Promise<string> {
     const cached = await this.redis.get(JWKS_PUBLIC_KEY_CACHE_KEY);
@@ -277,15 +300,18 @@ export class AuthService {
     return existing.publicKey;
   }
 
-  /** Get current JWKS private key: reuse from DB if a valid key exists, otherwise generate and store a new RSA key pair. */
-  private async getOrCreateJwksKey(): Promise<{ privateKeyPem: string }> {
+  /** Get current JWKS private key: reuse from DB if a valid key exists, otherwise generate and store a new RSA key pair. Returns kid for JWT header. */
+  private async getOrCreateJwksKey(): Promise<{
+    privateKeyPem: string;
+    kid: string;
+  }> {
     const now = new Date();
     const existing = await this.prisma.jwks.findFirst({
       where: { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
     });
     if (existing) {
       this.logger.debug(`Reusing existing JWKS key id=${existing.id}`);
-      return { privateKeyPem: existing.privateKey };
+      return { privateKeyPem: existing.privateKey, kid: existing.id };
     }
 
     this.logger.log('Creating new JWKS key pair');
@@ -305,7 +331,7 @@ export class AuthService {
       },
     });
     this.logger.log(`JWKS key created id=${jwksId}`);
-    return { privateKeyPem: privateKey };
+    return { privateKeyPem: privateKey, kid: jwksId };
   }
 
   /** Access token TTL in minutes from config, clamped to 15–30. Returns string like "15m" for jose. */
@@ -333,14 +359,14 @@ export class AuthService {
     );
   }
 
-  /** Issue a new RS256 access token for the given user id with configured TTL. */
+  /** Issue a new RS256 access token for the given user id with configured TTL. Header includes kid for JWKS lookup. */
   private async signAccessToken(userId: string): Promise<string> {
     this.logger.debug(`Signing access token for userId=${userId}`);
-    const { privateKeyPem } = await this.getOrCreateJwksKey();
+    const { privateKeyPem, kid } = await this.getOrCreateJwksKey();
     const privateKey = await jose.importPKCS8(privateKeyPem, 'RS256');
     const ttl = this.getAccessTokenTtl();
     return await new jose.SignJWT({})
-      .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
+      .setProtectedHeader({ alg: 'RS256', typ: 'JWT', kid })
       .setSubject(userId)
       .setIssuedAt()
       .setExpirationTime(ttl)

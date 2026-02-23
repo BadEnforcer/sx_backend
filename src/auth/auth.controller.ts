@@ -9,6 +9,7 @@ import {
 import { AuthService } from './auth.service';
 import {
   AuthTokensResponseDto,
+  JwksResponseDto,
   LoginDto,
   LogoutResponseDto,
   RegisterDto,
@@ -25,6 +26,25 @@ import { User } from './user.decorator';
 @Controller('api/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  /**
+   * Return the JSON Web Key Set (JWKS) of public keys used to sign access tokens.
+   * Public endpoint; no auth. Frontend can use this with jose.createRemoteJWKSet(new URL(...)) or similar to verify JWTs.
+   */
+  @Get('jwks')
+  @ApiOperation({
+    summary: 'JWKS',
+    description:
+      'JSON Web Key Set of public keys for verifying access tokens. Use with jose or similar on the frontend.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'JWKS with keys array (each key has kid, kty, n, e, alg, use)',
+    type: JwksResponseDto,
+  })
+  async jwksController(): Promise<JwksResponseDto> {
+    return (await this.authService.getJwks()) as unknown as JwksResponseDto;
+  }
 
   /**
    * Register a new user. Creates user and credential account, then returns user plus access and refresh tokens.
