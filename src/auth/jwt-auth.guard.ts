@@ -14,6 +14,7 @@ export class JwtAuthGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<{
       headers: { authorization?: string };
       user?: { userId: string };
+      accessToken?: string;
     }>();
     const authHeader = request.headers?.authorization;
     const token = this.extractBearerToken(authHeader);
@@ -25,8 +26,15 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     try {
+      const isBlacklisted =
+        await this.authService.isAccessTokenBlacklisted(token);
+      if (isBlacklisted) {
+        throw new UnauthorizedException('Invalid or expired token');
+      }
+
       const payload = await this.authService.verifyAccessToken(token);
       request.user = { userId: payload.sub };
+      request.accessToken = token;
       return true;
     } catch {
       throw new UnauthorizedException('Invalid or expired token');

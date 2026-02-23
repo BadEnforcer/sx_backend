@@ -158,9 +158,22 @@ export class AuthService {
     return user;
   }
 
-  async logout(userId: string) {
+  async logout(userId: string, accessToken?: string) {
     this.logger.log(`Logout for userId=${userId}`);
-    return true;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.session.deleteMany({
+        where: { userId },
+      });
+    });
+    this.logger.log(`Revoked all refresh sessions for userId=${userId}`);
+
+    if (accessToken) {
+      await this.blacklistAccessToken(accessToken);
+      this.logger.log(`Blacklisted access token for userId=${userId}`);
+    }
+
+    return { success: true };
   }
 
   /** Verifies the access token (signature + expiry) and returns the payload. Throws if invalid. */
@@ -171,6 +184,34 @@ export class AuthService {
     const sub = payload.sub;
     if (typeof sub !== 'string') throw new Error('Invalid token: missing sub');
     return { sub };
+  }
+
+  private getAccessTokenBlacklistKey(token: string): string {
+    const hash = crypto.createHash('sha256').update(token).digest('hex');
+    return `jwt:blacklist:${hash}`;
+  }
+
+  async isAccessTokenBlacklisted(token: string): Promise<boolean> {
+    const key = this.getAccessTokenBlacklistKey(token);
+    const exists = await this.redis.exists(key);
+    return exists === 1;
+  }
+
+  async blacklistAccessToken(token: string): Promise<void> {
+    const payload = jose.decodeJwt(token);
+    const exp = payload.exp;
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    let ttlSeconds = ACCESS_TOKEN_TTL_MIN_DEFAULT * 60;
+
+    if (typeof exp === 'number') {
+      ttlSeconds = Math.max(0, exp - nowSeconds);
+      if (ttlSeconds === 0) {
+        return;
+      }
+    }
+
+    const key = this.getAccessTokenBlacklistKey(token);
+    await this.redis.set(key, '1', 'EX', ttlSeconds);
   }
 
   private async getPublicKey(): Promise<string> {
