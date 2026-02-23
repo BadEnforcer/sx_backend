@@ -5,6 +5,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { Request } from 'express';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { Request } from 'express';
         storage: new ThrottlerStorageRedisService(),
       }),
     }),
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [AppService],
