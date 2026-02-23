@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -139,7 +140,22 @@ export class AuthService {
 
   async me(userId: string) {
     this.logger.log(`Me requested for userId=${userId}`);
-    return true;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        sessions: true,
+        accounts: true,
+      },
+    });
+
+    if (!user) {
+      this.logger.error(`Me failed: user not found userId=${userId}`);
+      throw new NotFoundException('User not found');
+    }
+
+    this.logger.log(`Returning user and session info for ${user.email}`);
+    return user;
   }
 
   async logout(userId: string) {
